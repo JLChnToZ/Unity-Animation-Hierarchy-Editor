@@ -14,7 +14,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     Animator animatorObject;
     readonly HashSet<RuntimeAnimatorController> animatorControllers = new HashSet<RuntimeAnimatorController>();
     readonly Dictionary<AnimationClip, AnimationClip> animationClips = new Dictionary<AnimationClip, AnimationClip>();
-    Dictionary<string, HashSet<EditorCurveBinding>> paths;
+    readonly Dictionary<string, HashSet<EditorCurveBinding>> paths = new Dictionary<string, HashSet<EditorCurveBinding>>(StringComparer.Ordinal);
     readonly Dictionary<string, bool> state = new Dictionary<string, bool>();
     readonly Dictionary<string, GameObject> objectCache = new Dictionary<string, GameObject>();
     readonly Dictionary<string, string> tempPathOverrides = new Dictionary<string, string>();
@@ -23,7 +23,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     string[] pathsArray;
     Vector2 scrollPos, scrollPos2;
     GUIContent tempContent;
-    bool locked;
+    bool locked, onlyShowMissing;
     string sOriginalRoot = "Root";
     string sNewRoot = "SomeNewObject/Root";
 
@@ -132,20 +132,15 @@ public class AnimationHierarchyEditor : EditorWindow {
 
         using (var scrollView = new EditorGUILayout.ScrollViewScope(scrollPos, GUILayout.Height(EditorGUIUtility.singleLineHeight * 5))) {
             scrollPos = scrollView.scrollPosition;
-            if (animationClips.Count == 0)
-                EditorGUILayout.HelpBox("Please select Animation Clips, Animators and/or Animator Controllers that has Animation Clips assigned.", MessageType.Info, true);
-            else {
-                GUILayout.Label("Selected Animation Clips", EditorStyles.boldLabel, GUILayout.Width(columnWidth));
-                using (new EditorGUILayout.HorizontalScope()) {
-                    using (new EditorGUI.DisabledScope(true)) {
-                        using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
-                            foreach (var animationClip in animatorControllers)
-                                EditorGUILayout.ObjectField(animationClip, typeof(RuntimeAnimatorController), true);
-                        using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
-                            foreach (var animationClip in animationClips.Keys)
-                                EditorGUILayout.ObjectField(animationClip, typeof(AnimationClip), true);
-                    }
-                }
+            GUILayout.Label("Selected Animation Clips", EditorStyles.boldLabel, GUILayout.Width(columnWidth));
+            using (new EditorGUILayout.HorizontalScope())
+            using (new EditorGUI.DisabledScope(true)) {
+                using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
+                    foreach (var animationClip in animatorControllers)
+                        EditorGUILayout.ObjectField(animationClip, typeof(RuntimeAnimatorController), true);
+                using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
+                    foreach (var animationClip in animationClips.Keys)
+                        EditorGUILayout.ObjectField(animationClip, typeof(AnimationClip), true);
             }
         }
 
@@ -166,20 +161,21 @@ public class AnimationHierarchyEditor : EditorWindow {
             GUILayout.Label("Bindings", EditorStyles.boldLabel, GUILayout.Width(60));
             GUILayout.Label("Animated Object", EditorStyles.boldLabel, GUILayout.Width(columnWidth));
             GUILayout.Label("Reference Path", EditorStyles.boldLabel);
+            using (new EditorGUI.DisabledScope(animatorObject == null))
+                onlyShowMissing = GUILayout.Toggle(onlyShowMissing, "Only Show Missing", EditorStyles.toggle, GUILayout.ExpandWidth(false));
         }
         using (var scrollView = new EditorGUILayout.ScrollViewScope(scrollPos2)) {
             scrollPos2 = scrollView.scrollPosition;
-            using (new EditorGUI.DisabledScope(animationClips.Count == 0)) {
-                if (pathsArray != null)
-                    for (int i = 0; i < pathsArray.Length; i++)
-                        GUICreatePathItem(pathsArray[i]);
-            }
+            if (animationClips.Count > 0 && pathsArray != null)
+                for (int i = 0; i < pathsArray.Length; i++)
+                    GUICreatePathItem(pathsArray[i]);
         }
     }
 
     void GUICreatePathItem(string path) {
         if (!paths.TryGetValue(path, out var properties)) return;
         var gameObject = FindObjectInRoot(path);
+        if (onlyShowMissing && gameObject != null) return;
 
         if (!tempPathOverrides.TryGetValue(path, out var newPath)) newPath = path;
 
@@ -193,21 +189,34 @@ public class AnimationHierarchyEditor : EditorWindow {
                     if (changed.changed) state[path] = expanded;
                 }
                 using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth))) {
-                    Type defaultType = null;
+                    Type defaultType = null, transformType = null;
+                    int customTypeCount = 0;
                     foreach (var entry in properties) {
                         var type = entry.type;
-                        tempTypes.TryGetValue(type, out var count);
+                        if (!tempTypes.TryGetValue(type, out var count)) {
+                            if (typeof(Transform).IsAssignableFrom(type))
+                                transformType = type;
+                            else if (type != typeof(GameObject)) {
+                                if (defaultType == null)
+                                    defaultType = type;
+                                customTypeCount++;
+                            }
+                        }
                         tempTypes[type] = count + 1;
-                        if (defaultType == null && type != typeof(GameObject))
-                            defaultType = type;
                     }
-                    if (tempTypes.Count > 1) defaultType = null;
-                    GUI.backgroundColor = color;
+                    if (customTypeCount > 1) defaultType = transformType;
+                    else if (defaultType == null) defaultType = transformType;
+                    if (animatorObject != null) GUI.backgroundColor = color;
                     UnityObject subObject = gameObject;
                     if (defaultType != null && gameObject != null && gameObject.TryGetComponent(defaultType, out var component))
                         subObject = component;
+                    using (new EditorGUI.DisabledScope(animatorObject == null))
                     using (var changed = new EditorGUI.ChangeCheckScope()) {
-                        var newSubObject = EditorGUILayout.ObjectField(subObject, defaultType ?? typeof(GameObject), true, GUILayout.ExpandWidth(true));
+                        var newSubObject = EditorGUILayout.ObjectField(
+                            subObject,
+                            (subObject != null ? subObject.GetType() : null) ?? defaultType ?? typeof(GameObject),
+                            true, GUILayout.ExpandWidth(true)
+                        );
                         if (changed.changed) {
                             if (newSubObject is GameObject newGameObject) {}
                             else if (newSubObject is Component newComponent) newGameObject = newComponent.gameObject;
@@ -221,7 +230,7 @@ public class AnimationHierarchyEditor : EditorWindow {
                             if (tempContent == null) tempContent = new GUIContent();
                             tempContent.image = AssetPreview.GetMiniTypeThumbnail(type);
                             tempContent.text = $"{ObjectNames.NicifyVariableName(type.Name)} ({kv.Value} Bindings)";
-                            GUI.backgroundColor = gameObject != null && gameObject.TryGetComponent(type, out var _) ? Color.green : Color.red;
+                            if (animatorObject != null) GUI.backgroundColor = gameObject != null && gameObject.TryGetComponent(type, out var _) ? Color.green : Color.red;
                             EditorGUILayout.LabelField(tempContent, EditorStyles.objectFieldThumb);
                         }
                         EditorGUILayout.Space();
@@ -230,7 +239,7 @@ public class AnimationHierarchyEditor : EditorWindow {
                     GUI.backgroundColor = bgColor;
                 }
             }
-            GUI.backgroundColor = color;
+            if (animatorObject != null) GUI.backgroundColor = color;
             newPath = EditorGUILayout.TextField(newPath, GUILayout.ExpandWidth(true));
             GUI.backgroundColor = bgColor;
             if (newPath != path) tempPathOverrides[path] = newPath;
@@ -246,10 +255,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     void OnHierarchyChanged() => objectCache.Clear();
 
     void FillModel() {
-        if (paths == null)
-            paths = new Dictionary<string, HashSet<EditorCurveBinding>>(StringComparer.Ordinal);
-        else
-            paths.Clear();
+        paths.Clear();
         foreach (var animationClip in animationClips.Keys) {
             FillModelWithCurves(AnimationUtility.GetCurveBindings(animationClip));
             FillModelWithCurves(AnimationUtility.GetObjectReferenceCurveBindings(animationClip));
