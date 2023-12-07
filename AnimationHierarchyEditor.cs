@@ -13,13 +13,13 @@ public class AnimationHierarchyEditor : EditorWindow {
     static GUIStyle lockIcon;
     Animator animatorObject;
     readonly HashSet<RuntimeAnimatorController> animatorControllers = new HashSet<RuntimeAnimatorController>();
-    readonly Dictionary<AnimationClip, AnimationClip> animationClips = new Dictionary<AnimationClip, AnimationClip>();
+    readonly Dictionary<Motion, Motion> motions = new Dictionary<Motion, Motion>();
     readonly Dictionary<string, HashSet<EditorCurveBinding>> paths = new Dictionary<string, HashSet<EditorCurveBinding>>(StringComparer.Ordinal);
     readonly Dictionary<string, bool> state = new Dictionary<string, bool>();
     readonly Dictionary<string, GameObject> objectCache = new Dictionary<string, GameObject>();
     readonly Dictionary<string, string> tempPathOverrides = new Dictionary<string, string>();
     readonly Dictionary<Type, int> tempTypes = new Dictionary<Type, int>();
-    AnimationClip[] clipsArray;
+    Motion[] motionsArray;
     string[] pathsArray;
     Vector2 scrollPos, scrollPos2;
     GUIContent tempContent;
@@ -45,7 +45,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     void OnSelectionChange() {
         if (locked) return;
         objectCache.Clear();
-        animationClips.Clear();
+        motions.Clear();
         animatorControllers.Clear();
         Animator defaultAnimator = null;
         foreach (var obj in Selection.gameObjects) {
@@ -62,11 +62,11 @@ public class AnimationHierarchyEditor : EditorWindow {
                 AddClips(controller);
             else if (obj is AnimatorOverrideController overrideController)
                 AddClips(overrideController);
-            else if (obj is AnimationClip clip)
-                AddClips(clip);
+            else if (obj is Motion motion)
+                AddClips(motion);
         }
         if (animatorObject == null) animatorObject = defaultAnimator;
-        if (animationClips.Count > 0) FillModel();
+        if (motions.Count > 0) FillModel();
         Repaint();
     }
 
@@ -103,13 +103,22 @@ public class AnimationHierarchyEditor : EditorWindow {
         animatorControllers.Add(animatorController);
         foreach (var layer in animatorController.layers)
             foreach (var state in layer.stateMachine.states)
-                if (state.state.motion is AnimationClip clip)
-                    AddClips(clip);
+                AddClips(state.state.motion);
     }
 
-    void AddClips(AnimationClip clip) {
-        if (clip == null || animationClips.ContainsKey(clip)) return;
-        animationClips.Add(clip, null);
+    void AddClips(Motion motion) {
+        if (motion == null) return;
+        var stack = new Stack<Motion>();
+        stack.Push(motion);
+        while (stack.Count > 0) {
+            motion = stack.Pop();
+            if (motion == null || motions.ContainsKey(motion)) continue;
+            motions.Add(motion, null);
+            if (motion is BlendTree blendTree) {
+                foreach (var child in blendTree.children) stack.Push(child.motion);
+                continue;
+            }
+        }
     }
 
     void OnGUI() {
@@ -135,16 +144,21 @@ public class AnimationHierarchyEditor : EditorWindow {
             GUILayout.Label("Selected Animation Clips", EditorStyles.boldLabel, GUILayout.Width(columnWidth));
             using (new EditorGUILayout.HorizontalScope())
             using (new EditorGUI.DisabledScope(true)) {
-                using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
+                using (new EditorGUILayout.VerticalScope(GUILayout.MaxWidth(columnWidth)))
                     foreach (var animationClip in animatorControllers)
                         EditorGUILayout.ObjectField(animationClip, typeof(RuntimeAnimatorController), true);
-                using (new EditorGUILayout.VerticalScope(GUILayout.Width(columnWidth)))
-                    foreach (var animationClip in animationClips.Keys)
-                        EditorGUILayout.ObjectField(animationClip, typeof(AnimationClip), true);
+                using (new EditorGUILayout.VerticalScope(GUILayout.MaxWidth(columnWidth)))
+                    foreach (var motion in motions.Keys)
+                        if (motion is BlendTree)
+                            EditorGUILayout.ObjectField(motion, typeof(BlendTree), true);
+                using (new EditorGUILayout.VerticalScope(GUILayout.MaxWidth(columnWidth)))
+                    foreach (var motion in motions.Keys)
+                        if (motion is AnimationClip)
+                            EditorGUILayout.ObjectField(motion, typeof(AnimationClip), true);
             }
         }
 
-        using (new EditorGUI.DisabledScope(animationClips.Count == 0)) {
+        using (new EditorGUI.DisabledScope(motions.Count == 0)) {
             using (new EditorGUILayout.HorizontalScope()) {
                 sOriginalRoot = EditorGUILayout.TextField(sOriginalRoot, GUILayout.ExpandWidth(true));
                 sNewRoot = EditorGUILayout.TextField(sNewRoot, GUILayout.ExpandWidth(true));
@@ -166,7 +180,7 @@ public class AnimationHierarchyEditor : EditorWindow {
         }
         using (var scrollView = new EditorGUILayout.ScrollViewScope(scrollPos2)) {
             scrollPos2 = scrollView.scrollPosition;
-            if (animationClips.Count > 0 && pathsArray != null)
+            if (motions.Count > 0 && pathsArray != null)
                 for (int i = 0; i < pathsArray.Length; i++)
                     GUICreatePathItem(pathsArray[i]);
         }
@@ -230,7 +244,7 @@ public class AnimationHierarchyEditor : EditorWindow {
                             if (tempContent == null) tempContent = new GUIContent();
                             tempContent.image = AssetPreview.GetMiniTypeThumbnail(type);
                             tempContent.text = $"{ObjectNames.NicifyVariableName(type.Name)} ({kv.Value} Bindings)";
-                            if (animatorObject != null) GUI.backgroundColor = gameObject != null && gameObject.TryGetComponent(type, out var _) ? Color.green : Color.red;
+                            if (animatorObject != null) GUI.backgroundColor = gameObject != null && (type == typeof(GameObject) || gameObject.TryGetComponent(type, out var _)) ? Color.green : Color.red;
                             EditorGUILayout.LabelField(tempContent, EditorStyles.objectFieldThumb);
                         }
                         EditorGUILayout.Space();
@@ -239,9 +253,7 @@ public class AnimationHierarchyEditor : EditorWindow {
                     GUI.backgroundColor = bgColor;
                 }
             }
-            if (animatorObject != null) GUI.backgroundColor = color;
             newPath = EditorGUILayout.TextField(newPath, GUILayout.ExpandWidth(true));
-            GUI.backgroundColor = bgColor;
             if (newPath != path) tempPathOverrides[path] = newPath;
             if (GUILayout.Button("Change", EditorStyles.miniButton, GUILayout.ExpandWidth(false))) {
                 UpdatePath(path, newPath);
@@ -256,7 +268,8 @@ public class AnimationHierarchyEditor : EditorWindow {
 
     void FillModel() {
         paths.Clear();
-        foreach (var animationClip in animationClips.Keys) {
+        foreach (var motion in motions.Keys) {
+            if (!(motion is AnimationClip animationClip)) continue;
             FillModelWithCurves(AnimationUtility.GetCurveBindings(animationClip));
             FillModelWithCurves(AnimationUtility.GetObjectReferenceCurveBindings(animationClip));
         }
@@ -292,16 +305,17 @@ public class AnimationHierarchyEditor : EditorWindow {
     void UpdatePath(Func<string, string> converter) {
         EnsureAssetModifiable();
         AssetDatabase.StartAssetEditing();
-        if (clipsArray == null || clipsArray.Length != animationClips.Count)
-            clipsArray = new AnimationClip[animationClips.Count];
-        animationClips.Keys.CopyTo(clipsArray, 0);
-        for (int i = 0; i < clipsArray.Length; i++) {
-            if (!animationClips.TryGetValue(clipsArray[i], out var animationClip))
-                animationClip = clipsArray[i];
+        if (motionsArray == null || motionsArray.Length != motions.Count)
+            motionsArray = new Motion[motions.Count];
+        motions.Keys.CopyTo(motionsArray, 0);
+        for (int i = 0; i < motionsArray.Length; i++) {
+            if (!(motionsArray[i] is AnimationClip animationClip)) continue;
+            if (motions.TryGetValue(motionsArray[i], out var motion))
+                animationClip = motion as AnimationClip;
             if (AssetDatabase.IsForeignAsset(animationClip)) {
                 var newClip = Instantiate(animationClip);
                 newClip.name = animationClip.name;
-                animationClips[animationClip] = newClip;
+                motions[animationClip] = newClip;
                 animationClip = newClip;
             }
             Undo.RecordObject(animationClip, "Animation Hierarchy Change");
@@ -311,12 +325,12 @@ public class AnimationHierarchyEditor : EditorWindow {
                     var binding = curves[j];
                     var newPath = converter(binding.path);
                     if (string.IsNullOrEmpty(newPath)) continue;
-                    UpdateBinding(clipsArray[i], animationClip, binding, newPath);
+                    UpdateBinding(motionsArray[i] as AnimationClip, animationClip, binding, newPath);
                 } finally {
                     EditorUtility.DisplayProgressBar(
                         "Updating Animation Hierarchy",
                         animationClip.name,
-                        (i + (float)j / curves.Length) / animationClips.Count
+                        (i + (float)j / curves.Length) / motions.Count
                     );
                 }
         }
@@ -345,7 +359,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     }
 
     void EnsureAssetModifiable() {
-        foreach (var kv in animationClips) {
+        foreach (var kv in motions) {
             if (kv.Value != null) {
                 if (AssetDatabase.IsForeignAsset(kv.Value))
                     throw new UnityException($"Animation clip {kv.Value} is not modifiable!");
@@ -360,13 +374,13 @@ public class AnimationHierarchyEditor : EditorWindow {
     }
 
     bool SaveModifiedAssets(bool forceSaveAs = false) {
-        var clipsRequrieToSave = new HashSet<AnimationClip>();
-        var clips = new List<AnimationClip>(animationClips.Keys);
-        foreach (var animationClip in clips)
-            if (animationClips.TryGetValue(animationClip, out var modifiedClip)) {
-                if (forceSaveAs) modifiedClip = Instantiate(modifiedClip == null ? animationClip : modifiedClip);
-                if (modifiedClip != null && string.IsNullOrEmpty(AssetDatabase.GetAssetPath(modifiedClip)))
-                    clipsRequrieToSave.Add(modifiedClip);
+        var motionRequireToSave = new HashSet<Motion>();
+        var motionList = new List<Motion>(motions.Keys);
+        foreach (var motion in motionList)
+            if (motions.TryGetValue(motion, out var modifiedMotion)) {
+                if (forceSaveAs) modifiedMotion = Instantiate(modifiedMotion == null ? motion : modifiedMotion);
+                if (modifiedMotion != null && string.IsNullOrEmpty(AssetDatabase.GetAssetPath(modifiedMotion)))
+                    motionRequireToSave.Add(modifiedMotion);
             }
         UnityObject rootAsset = null;
         var path = EditorUtility.SaveFilePanelInProject(
@@ -377,7 +391,7 @@ public class AnimationHierarchyEditor : EditorWindow {
             AssetDatabase.GetAssetPath(animatorObject) ?? ""
         );
         if (string.IsNullOrEmpty(path)) return false;
-        foreach (var clip in clipsRequrieToSave) {
+        foreach (var clip in motionRequireToSave) {
             if (rootAsset == null) {
                 rootAsset = clip;
                 AssetDatabase.CreateAsset(clip, path);
@@ -385,29 +399,57 @@ public class AnimationHierarchyEditor : EditorWindow {
                 AssetDatabase.AddObjectToAsset(clip, rootAsset);
         }
         List<KeyValuePair<AnimationClip, AnimationClip>> overrides = null;
+        var stack = new Stack<Motion>();
         foreach (var controller in animatorControllers) {
             if (controller is AnimatorController animatorController) {
                 foreach (var layer in animatorController.layers)
-                    foreach (var state in layer.stateMachine.states)
-                        if (state.state.motion is AnimationClip clip && animationClips.TryGetValue(clip, out var modifiedClip))
-                            state.state.motion = modifiedClip;
+                    foreach (var state in layer.stateMachine.states) {
+                        var animState = state.state;
+                        var motion = animState.motion;
+                        if (motions.TryGetValue(motion, out var modifiedMotion)) {
+                            animState.motion = modifiedMotion;
+                            EditorUtility.SetDirty(animState);
+                        }
+                        stack.Push(motion);
+                    }
             } else if (controller is AnimatorOverrideController animatorOverrideController) {
                 if (overrides == null) overrides = new List<KeyValuePair<AnimationClip, AnimationClip>>();
                 animatorOverrideController.GetOverrides(overrides);
                 for (int i = 0, count = overrides.Count; i < count; i++) {
                     var pair = overrides[i];
-                    if (animationClips.TryGetValue(pair.Value, out var modifiedClip))
-                        overrides[i] = new KeyValuePair<AnimationClip, AnimationClip>(pair.Key, modifiedClip);
+                    if (motions.TryGetValue(pair.Value, out var modifiedClip))
+                        overrides[i] = new KeyValuePair<AnimationClip, AnimationClip>(pair.Key, modifiedClip as AnimationClip);
                 }
                 animatorOverrideController.ApplyOverrides(overrides);
             }
             EditorUtility.SetDirty(controller);
         }
+        while (stack.Count > 0) {
+            var motion = stack.Pop();
+            if (motion is BlendTree blendTree) {
+                var children = blendTree.children;
+                bool hasModified = false;
+                for (int i = 0, count = children.Length; i < count; i++) {
+                    var child = children[i];
+                    if (motions.TryGetValue(child.motion, out var modifiedMotion)) {
+                        child.motion = modifiedMotion;
+                        children[i] = child;
+                        hasModified = true;
+                    }
+                    stack.Push(child.motion);
+                }
+                if (hasModified) {
+                    blendTree.children = children;
+                    EditorUtility.SetDirty(blendTree);
+                }
+                continue;
+            }
+        }
         AssetDatabase.SaveAssets();
-        clips.Clear();
-        foreach (var kv in animationClips) clips.Add(kv.Value != null ? kv.Value : kv.Key);
-        animationClips.Clear();
-        foreach (var clip in clips) animationClips[clip] = null;
+        motionList.Clear();
+        foreach (var kv in motions) motionList.Add(kv.Value != null ? kv.Value : kv.Key);
+        motions.Clear();
+        foreach (var clip in motionList) motions[clip] = null;
         return true;
     }
 
