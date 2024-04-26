@@ -10,7 +10,15 @@ Place the AnimationHierarchyEditor.cs file in the `[project folder]/Editors/` fo
 
 The editor should appear once you've selected the animation clip you want to edit.
 
+## Difference to the Original Version
 
-### License
+This forked version has been enhanced to include these features:
+
+- Supports batch refactoring by selecting multiple animation controllers, animation clips and/or nested blendtrees.
+- Lock button to locks current selection
+- Auto clone modified clips
+- Auto updates selected animation clips on modifying hierarchy when toggled
+
+## License
 
 The original was released into public domain though, this modified version is licensed under [MIT](LICENSE).
