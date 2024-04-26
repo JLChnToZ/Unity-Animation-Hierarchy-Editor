@@ -1,4 +1,4 @@
-#if UNITY_EDITOR
+﻿#if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
@@ -23,7 +23,7 @@ public class AnimationHierarchyEditor : EditorWindow {
     string[] pathsArray;
     Vector2 scrollPos, scrollPos2;
     GUIContent tempContent;
-    bool locked, onlyShowMissing;
+    bool locked, onlyShowMissing, autoResolveMode, cloneOnModify;
     string sOriginalRoot = "Root";
     string sNewRoot = "SomeNewObject/Root";
 
@@ -135,8 +135,13 @@ public class AnimationHierarchyEditor : EditorWindow {
                 if (changed.changed) OnHierarchyChanged();
             }
             GUILayout.FlexibleSpace();
+            cloneOnModify = GUILayout.Toggle(cloneOnModify, "Clone on Modify", EditorStyles.toolbarButton);
             if (GUILayout.Button("Save Animation Clips", EditorStyles.toolbarButton)) SaveModifiedAssets();
             if (GUILayout.Button("Save Clones", EditorStyles.toolbarButton)) SaveModifiedAssets(true);
+            using (var changed = new EditorGUI.ChangeCheckScope()) {
+                autoResolveMode = GUILayout.Toggle(autoResolveMode, "Auto Resolve", EditorStyles.toolbarButton);
+                if (changed.changed && autoResolveMode) StartAutoResolve();
+            }
         }
 
         using (var scrollView = new EditorGUILayout.ScrollViewScope(scrollPos, GUILayout.Height(EditorGUIUtility.singleLineHeight * 5))) {
@@ -264,7 +269,27 @@ public class AnimationHierarchyEditor : EditorWindow {
 
     void OnInspectorUpdate() => Repaint();
 
-    void OnHierarchyChanged() => objectCache.Clear();
+    void OnHierarchyChanged() {
+        if (!autoResolveMode) {
+            objectCache.Clear();
+            return;
+        }
+        var kvps = new KeyValuePair<string, GameObject>[objectCache.Count];
+        (objectCache as ICollection<KeyValuePair<string, GameObject>>).CopyTo(kvps, 0);
+        foreach (var kvp in kvps) {
+            var path = kvp.Key;
+            var obj = kvp.Value;
+            if (obj == null) {
+                objectCache.Remove(path);
+                continue;
+            }
+            var newPath = ChildPath(obj);
+            if (UpdatePath(path, newPath)) {
+                objectCache.Remove(path);
+                objectCache[newPath] = obj;
+            }
+        }
+    }
 
     void FillModel() {
         paths.Clear();
@@ -277,7 +302,12 @@ public class AnimationHierarchyEditor : EditorWindow {
         paths.Keys.CopyTo(pathsArray, 0);
     }
 
-    private void FillModelWithCurves(EditorCurveBinding[] curves) {
+    void StartAutoResolve() {
+        objectCache.Clear();
+        foreach (var path in paths.Keys) FindObjectInRoot(path);
+    }
+
+    void FillModelWithCurves(EditorCurveBinding[] curves) {
         foreach (var curveData in curves) {
             var key = curveData.path;
             if (!paths.TryGetValue(key, out var properties)) {
@@ -293,13 +323,15 @@ public class AnimationHierarchyEditor : EditorWindow {
         UpdatePath(path => oldRootMatcher.Replace(path, newRoot));
     }
 
-    void UpdatePath(string oldPath, string newPath) {
+    bool UpdatePath(string oldPath, string newPath) {
+        if (oldPath == newPath) return true;
         if (paths.ContainsKey(newPath) && !EditorUtility.DisplayDialog(
             "Path already exists",
             $"Path `{newPath}` already exists.\nDo you want to overwrite it?",
             "Yes", "No"
-        )) return;
+        )) return false;
         UpdatePath(path => path == oldPath ? newPath : null);
+        return true;
     }
 
     void UpdatePath(Func<string, string> converter) {
@@ -310,9 +342,13 @@ public class AnimationHierarchyEditor : EditorWindow {
         motions.Keys.CopyTo(motionsArray, 0);
         for (int i = 0; i < motionsArray.Length; i++) {
             if (!(motionsArray[i] is AnimationClip animationClip)) continue;
-            if (motions.TryGetValue(motionsArray[i], out var motion))
+            if (motions.TryGetValue(motionsArray[i], out var motion) && motion != null)
                 animationClip = motion as AnimationClip;
-            if (AssetDatabase.IsForeignAsset(animationClip)) {
+            if (animationClip == null) {
+                Debug.LogError($"Motion {motionsArray[i]} is not an animation clip!");
+                continue;
+            }
+            if ((cloneOnModify && motion == null) || AssetDatabase.IsForeignAsset(animationClip)) {
                 var newClip = Instantiate(animationClip);
                 newClip.name = animationClip.name;
                 motions[animationClip] = newClip;
@@ -378,7 +414,10 @@ public class AnimationHierarchyEditor : EditorWindow {
         var motionList = new List<Motion>(motions.Keys);
         foreach (var motion in motionList)
             if (motions.TryGetValue(motion, out var modifiedMotion)) {
-                if (forceSaveAs) modifiedMotion = Instantiate(modifiedMotion == null ? motion : modifiedMotion);
+                if (forceSaveAs) {
+                    modifiedMotion = Instantiate(modifiedMotion == null ? motion : modifiedMotion);
+                    motions[motion] = modifiedMotion;
+                }
                 if (modifiedMotion != null && string.IsNullOrEmpty(AssetDatabase.GetAssetPath(modifiedMotion)))
                     motionRequireToSave.Add(modifiedMotion);
             }
@@ -406,6 +445,7 @@ public class AnimationHierarchyEditor : EditorWindow {
                     foreach (var state in layer.stateMachine.states) {
                         var animState = state.state;
                         var motion = animState.motion;
+                        if (motion == null) continue;
                         if (motions.TryGetValue(motion, out var modifiedMotion)) {
                             animState.motion = modifiedMotion;
                             EditorUtility.SetDirty(animState);
@@ -442,7 +482,6 @@ public class AnimationHierarchyEditor : EditorWindow {
                     blendTree.children = children;
                     EditorUtility.SetDirty(blendTree);
                 }
-                continue;
             }
         }
         AssetDatabase.SaveAssets();
