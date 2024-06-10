@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Deprecation Notice**  
+> We are migrating this component into AvaUtils, a package bundle contains miscellaneous tools for manipulating an avatar within Unity.
+> While download links are still valid in this repository, they will no longer updated for any bugs or new features.  
+> https://github.com/JLChnToZ/avautils
+
 > [!NOTE]
 > The upstream repository was no longer maintained for years. This is my own fork of it.
 
